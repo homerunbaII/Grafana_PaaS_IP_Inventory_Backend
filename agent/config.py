@@ -1,25 +1,30 @@
-﻿import os
+import os
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class AppSettings:
-    cors_origin: str
+    cors_origins: list[str]
     cluster_api_url_template: str
 
 
+def parse_cors_origins(raw_value: str) -> list[str]:
+    cleaned = [item.strip() for item in raw_value.split(",") if item.strip()]
+    return cleaned or ["*"]
+
+
 settings = AppSettings(
-    cors_origin=os.getenv('CORS_ORIGIN', 'http://localhost:3000'),
-    cluster_api_url_template=os.getenv('CLUSTER_API_URL_TEMPLATE', 'https://api.{cluster}:6443'),
+    cors_origins=parse_cors_origins(os.getenv("CORS_ORIGINS", "*")),
+    cluster_api_url_template=os.getenv("CLUSTER_API_URL_TEMPLATE", "https://api.{cluster}:6443"),
 )
 
 
-CORS_ORIGIN = settings.cors_origin
+CORS_ORIGINS = settings.cors_origins
 CLUSTER_API_URL_TEMPLATE = settings.cluster_api_url_template
 
 
 def build_cluster_api_url(cluster: str) -> str:
     cleaned = cluster.strip()
     if not cleaned:
-        raise ValueError('cluster must not be empty')
+        raise ValueError("cluster must not be empty")
     return CLUSTER_API_URL_TEMPLATE.format(cluster=cleaned)

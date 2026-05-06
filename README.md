@@ -1,12 +1,27 @@
-﻿# Grafana PaaS IP Inventory Backend
+# Grafana PaaS IP Inventory Backend
 
 Standalone FastAPI backend for PaaS IP inventory and IP ownership lookup.
 
-## Current Scope
+## Features
 
-- Minimal application scaffold
-- Health endpoint
-- Package layout ready for IP inventory routes, models, and services
+- List current node IP usage in a target cluster
+- List netnamespace egress IP usage in a target cluster
+- Look up which node or netnamespace is using a specific IP
+- Forward cluster API requests with a user-provided bearer token
+
+## Endpoints
+
+- `GET /`
+- `GET /health`
+- `POST /ip-inventory/list`
+- `POST /ip-inventory/lookup`
+
+## Environment Variables
+
+- `CLUSTER_API_URL_TEMPLATE`
+  - Default: `https://api.{cluster}:6443`
+- `CORS_ORIGINS`
+  - Default: `*`
 
 ## Run Locally
 
