@@ -80,13 +80,15 @@ def build_node_entries(payload: dict) -> list[dict]:
         labels = metadata.get("labels", {})
         addresses = status.get("addresses", [])
         roles = extract_node_roles(labels) or ["worker/other"]
-        ips = [address.get("address") for address in addresses if address.get("type") in {"InternalIP", "ExternalIP"}]
+        internal_ips = [address.get("address") for address in addresses if address.get("type") == "InternalIP"]
+        external_ips = [address.get("address") for address in addresses if address.get("type") == "ExternalIP"]
 
         entries.append(
             {
                 "name": metadata.get("name"),
                 "roles": roles,
-                "ips": [ip for ip in ips if ip],
+                "ips": [ip for ip in internal_ips if ip],
+                "externalIPs": [ip for ip in external_ips if ip],
                 "addresses": [
                     {
                         "type": address.get("type"),
@@ -156,6 +158,7 @@ def lookup_cluster_ip_usage(cluster: str, bearer_token: str, ip: str) -> dict:
         node
         for node in nodes
         if ip in node.get("ips", [])
+        or ip in node.get("externalIPs", [])
         or any(address.get("address") == ip for address in node.get("addresses", []))
     ]
     matching_netnamespaces = [entry for entry in netnamespaces if ip in entry.get("egressIPs", [])]

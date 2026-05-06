@@ -5,6 +5,7 @@ Standalone FastAPI backend for PaaS IP inventory and IP ownership lookup.
 ## Features
 
 - List current node IP usage in a target cluster
+- List current node external IP usage in a target cluster
 - List netnamespace egress IP usage in a target cluster
 - Look up which node or netnamespace is using a specific IP
 - Forward cluster API requests with a user-provided bearer token
