@@ -101,24 +101,14 @@ def build_node_entries(payload: dict) -> list[dict]:
         internal_ips = unique_non_empty_strings(
             [address.get("address") for address in addresses if address.get("type") == "InternalIP"]
         )
-        external_ips = unique_non_empty_strings(
-            [address.get("address") for address in addresses if address.get("type") == "ExternalIP"]
-        )
+        if not internal_ips:
+            continue
 
         entries.append(
             {
                 "name": metadata.get("name"),
                 "roles": roles,
                 "ips": internal_ips,
-                "externalIPs": external_ips,
-                "addresses": [
-                    {
-                        "type": address.get("type"),
-                        "address": address.get("address"),
-                    }
-                    for address in addresses
-                    if address.get("address")
-                ],
             }
         )
 
@@ -169,11 +159,15 @@ def build_netnamespace_entries(payload: dict) -> list[dict]:
     for item in items:
         metadata = item.get("metadata", {})
         egress_ips = item.get("egressIPs", []) or []
+        cleaned_egress_ips = unique_non_empty_strings(egress_ips)
+        if not cleaned_egress_ips:
+            continue
+
         entries.append(
             {
                 "name": metadata.get("name"),
                 "netid": item.get("netid"),
-                "egressIPs": unique_non_empty_strings(egress_ips),
+                "egressIPs": cleaned_egress_ips,
             }
         )
 
@@ -222,8 +216,6 @@ def lookup_cluster_ip_usage(cluster: str, bearer_token: str, ip: str) -> dict:
         node
         for node in nodes
         if ip in node.get("ips", [])
-        or ip in node.get("externalIPs", [])
-        or any(address.get("address") == ip for address in node.get("addresses", []))
     ]
     matching_services = [entry for entry in services if ip in entry.get("externalIPs", [])]
     matching_netnamespaces = [entry for entry in netnamespaces if ip in entry.get("egressIPs", [])]
