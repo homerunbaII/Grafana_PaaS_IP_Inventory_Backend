@@ -20,7 +20,7 @@ Standalone FastAPI backend for PaaS IP inventory and IP ownership lookup.
 ## Environment Variables
 
 - `CLUSTER_API_URL_TEMPLATE`
-  - Default: `https://api.{cluster}:6443`
+  - Default: `https://api.{cluster}.lguplus.co.kr:6443`
 
 ## Run Locally
 

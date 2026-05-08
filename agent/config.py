@@ -7,7 +7,7 @@ class AppSettings:
     cluster_api_url_template: str
 
 settings = AppSettings(
-    cluster_api_url_template=os.getenv("CLUSTER_API_URL_TEMPLATE", "https://api.{cluster}:6443"),
+    cluster_api_url_template=os.getenv("CLUSTER_API_URL_TEMPLATE", "https://api.{cluster}.lguplus.co.kr:6443"),
 )
 
 
