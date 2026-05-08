@@ -21,8 +21,6 @@ Standalone FastAPI backend for PaaS IP inventory and IP ownership lookup.
 
 - `CLUSTER_API_URL_TEMPLATE`
   - Default: `https://api.{cluster}:6443`
-- `CORS_ORIGINS`
-  - Default: `https://paasmon.apps.pcicd-k8s.lguplus.co.kr,http://paasmon.apps.pcicd-k8s.lguplus.co.kr`
 
 ## Run Locally
 
