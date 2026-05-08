@@ -8,6 +8,24 @@ from agent.config import build_cluster_api_url
 logger = logging.getLogger(__name__)
 
 
+def unique_non_empty_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+
+    for value in values:
+        if not isinstance(value, str):
+            continue
+
+        cleaned = value.strip()
+        if not cleaned or cleaned in seen:
+            continue
+
+        seen.add(cleaned)
+        result.append(cleaned)
+
+    return result
+
+
 def ensure_curl_available() -> None:
     if shutil.which("curl"):
         return
@@ -80,15 +98,19 @@ def build_node_entries(payload: dict) -> list[dict]:
         labels = metadata.get("labels", {})
         addresses = status.get("addresses", [])
         roles = extract_node_roles(labels) or ["worker/other"]
-        internal_ips = [address.get("address") for address in addresses if address.get("type") == "InternalIP"]
-        external_ips = [address.get("address") for address in addresses if address.get("type") == "ExternalIP"]
+        internal_ips = unique_non_empty_strings(
+            [address.get("address") for address in addresses if address.get("type") == "InternalIP"]
+        )
+        external_ips = unique_non_empty_strings(
+            [address.get("address") for address in addresses if address.get("type") == "ExternalIP"]
+        )
 
         entries.append(
             {
                 "name": metadata.get("name"),
                 "roles": roles,
-                "ips": [ip for ip in internal_ips if ip],
-                "externalIPs": [ip for ip in external_ips if ip],
+                "ips": internal_ips,
+                "externalIPs": external_ips,
                 "addresses": [
                     {
                         "type": address.get("type"),
@@ -97,6 +119,43 @@ def build_node_entries(payload: dict) -> list[dict]:
                     for address in addresses
                     if address.get("address")
                 ],
+            }
+        )
+
+    return entries
+
+
+def extract_service_external_ips(item: dict) -> list[str]:
+    spec = item.get("spec", {})
+    status = item.get("status", {})
+    load_balancer = status.get("loadBalancer", {})
+    ingress_entries = load_balancer.get("ingress", []) or []
+
+    spec_external_ips = spec.get("externalIPs", []) or []
+    load_balancer_ips = [entry.get("ip") for entry in ingress_entries if isinstance(entry, dict)]
+
+    return unique_non_empty_strings([*spec_external_ips, *load_balancer_ips])
+
+
+def build_service_entries(payload: dict) -> list[dict]:
+    items = payload.get("items", [])
+    entries: list[dict] = []
+
+    for item in items:
+        external_ips = extract_service_external_ips(item)
+        if not external_ips:
+            continue
+
+        metadata = item.get("metadata", {})
+        spec = item.get("spec", {})
+
+        entries.append(
+            {
+                "namespace": metadata.get("namespace"),
+                "name": metadata.get("name"),
+                "type": spec.get("type"),
+                "clusterIP": spec.get("clusterIP"),
+                "externalIPs": external_ips,
             }
         )
 
@@ -114,7 +173,7 @@ def build_netnamespace_entries(payload: dict) -> list[dict]:
             {
                 "name": metadata.get("name"),
                 "netid": item.get("netid"),
-                "egressIPs": [ip for ip in egress_ips if isinstance(ip, str) and ip.strip()],
+                "egressIPs": unique_non_empty_strings(egress_ips),
             }
         )
 
@@ -124,6 +183,7 @@ def build_netnamespace_entries(payload: dict) -> list[dict]:
 def list_cluster_ip_usage(cluster: str, bearer_token: str) -> dict:
     try:
         nodes_payload = run_cluster_curl(cluster, bearer_token, "/api/v1/nodes")
+        services_payload = run_cluster_curl(cluster, bearer_token, "/api/v1/services")
         netnamespaces_payload = run_cluster_curl(cluster, bearer_token, "/apis/network.openshift.io/v1/netnamespaces")
     except RuntimeError as exc:
         return {
@@ -134,14 +194,17 @@ def list_cluster_ip_usage(cluster: str, bearer_token: str) -> dict:
         }
 
     nodes = build_node_entries(nodes_payload)
+    services = build_service_entries(services_payload)
     netnamespaces = build_netnamespace_entries(netnamespaces_payload)
 
     return {
         "ok": True,
         "cluster": cluster,
         "node_count": len(nodes),
+        "service_count": len(services),
         "netnamespace_count": len(netnamespaces),
         "nodes": nodes,
+        "services": services,
         "netnamespaces": netnamespaces,
     }
 
@@ -152,6 +215,7 @@ def lookup_cluster_ip_usage(cluster: str, bearer_token: str, ip: str) -> dict:
         return listed
 
     nodes = listed.get("nodes", [])
+    services = listed.get("services", [])
     netnamespaces = listed.get("netnamespaces", [])
 
     matching_nodes = [
@@ -161,6 +225,7 @@ def lookup_cluster_ip_usage(cluster: str, bearer_token: str, ip: str) -> dict:
         or ip in node.get("externalIPs", [])
         or any(address.get("address") == ip for address in node.get("addresses", []))
     ]
+    matching_services = [entry for entry in services if ip in entry.get("externalIPs", [])]
     matching_netnamespaces = [entry for entry in netnamespaces if ip in entry.get("egressIPs", [])]
 
     return {
@@ -168,6 +233,7 @@ def lookup_cluster_ip_usage(cluster: str, bearer_token: str, ip: str) -> dict:
         "cluster": cluster,
         "ip": ip,
         "matching_nodes": matching_nodes,
+        "matching_services": matching_services,
         "matching_netnamespaces": matching_netnamespaces,
-        "matched": bool(matching_nodes or matching_netnamespaces),
+        "matched": bool(matching_nodes or matching_services or matching_netnamespaces),
     }
