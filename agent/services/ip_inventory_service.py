@@ -3,7 +3,8 @@ import logging
 import shutil
 import subprocess
 
-from agent.config import CLUSTER_API_INSECURE, build_cluster_api_url
+from agent.config import CLUSTER_API_INSECURE, get_cluster_bearer_token, get_inventory_clusters, is_all_clusters_target
+from agent.config import build_cluster_api_url
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +33,10 @@ def ensure_curl_available() -> None:
     raise RuntimeError("curl is not available in this environment")
 
 
-def run_cluster_curl(cluster: str, bearer_token: str, api_path: str) -> dict:
+def run_cluster_curl(cluster: str, api_path: str) -> dict:
     ensure_curl_available()
 
+    bearer_token = get_cluster_bearer_token(cluster)
     base_url = build_cluster_api_url(cluster)
     url = f"{base_url}{api_path}"
     command = [
@@ -181,12 +183,12 @@ def build_netnamespace_entries(payload: dict) -> list[dict]:
     return entries
 
 
-def list_cluster_ip_usage(cluster: str, bearer_token: str) -> dict:
+def list_cluster_ip_usage(cluster: str) -> dict:
     try:
-        nodes_payload = run_cluster_curl(cluster, bearer_token, "/api/v1/nodes")
-        services_payload = run_cluster_curl(cluster, bearer_token, "/api/v1/services")
-        netnamespaces_payload = run_cluster_curl(cluster, bearer_token, "/apis/network.openshift.io/v1/netnamespaces")
-    except RuntimeError as exc:
+        nodes_payload = run_cluster_curl(cluster, "/api/v1/nodes")
+        services_payload = run_cluster_curl(cluster, "/api/v1/services")
+        netnamespaces_payload = run_cluster_curl(cluster, "/apis/network.openshift.io/v1/netnamespaces")
+    except (RuntimeError, ValueError) as exc:
         return {
             "ok": False,
             "error": "cluster_query_failed",
@@ -210,8 +212,8 @@ def list_cluster_ip_usage(cluster: str, bearer_token: str) -> dict:
     }
 
 
-def lookup_cluster_ip_usage(cluster: str, bearer_token: str, ip: str) -> dict:
-    listed = list_cluster_ip_usage(cluster, bearer_token)
+def lookup_cluster_ip_usage(cluster: str, ip: str) -> dict:
+    listed = list_cluster_ip_usage(cluster)
     if listed.get("ok") is False:
         return listed
 
@@ -219,11 +221,7 @@ def lookup_cluster_ip_usage(cluster: str, bearer_token: str, ip: str) -> dict:
     services = listed.get("services", [])
     netnamespaces = listed.get("netnamespaces", [])
 
-    matching_nodes = [
-        node
-        for node in nodes
-        if ip in node.get("ips", [])
-    ]
+    matching_nodes = [node for node in nodes if ip in node.get("ips", [])]
     matching_services = [entry for entry in services if ip in entry.get("externalIPs", [])]
     matching_netnamespaces = [entry for entry in netnamespaces if ip in entry.get("egressIPs", [])]
 
@@ -236,3 +234,74 @@ def lookup_cluster_ip_usage(cluster: str, bearer_token: str, ip: str) -> dict:
         "matching_netnamespaces": matching_netnamespaces,
         "matched": bool(matching_nodes or matching_services or matching_netnamespaces),
     }
+
+
+def annotate_cluster_entries(cluster: str, entries: list[dict]) -> list[dict]:
+    return [{**entry, "cluster": cluster} for entry in entries]
+
+
+def list_all_cluster_ip_usage() -> dict:
+    results = [list_cluster_ip_usage(cluster) for cluster in get_inventory_clusters()]
+    successful_results = [result for result in results if result.get("ok")]
+
+    return {
+        "ok": True,
+        "cluster": "all",
+        "cluster_count": len(results),
+        "successful_cluster_count": len(successful_results),
+        "failed_cluster_count": len(results) - len(successful_results),
+        "node_count": sum(int(result.get("node_count", 0) or 0) for result in successful_results),
+        "service_count": sum(int(result.get("service_count", 0) or 0) for result in successful_results),
+        "netnamespace_count": sum(int(result.get("netnamespace_count", 0) or 0) for result in successful_results),
+        "clusters": results,
+    }
+
+
+def lookup_all_cluster_ip_usage(ip: str) -> dict:
+    results = [lookup_cluster_ip_usage(cluster, ip) for cluster in get_inventory_clusters()]
+    successful_results = [result for result in results if result.get("ok")]
+
+    matching_nodes: list[dict] = []
+    matching_services: list[dict] = []
+    matching_netnamespaces: list[dict] = []
+    matched_cluster_count = 0
+
+    for result in successful_results:
+        cluster = str(result.get("cluster", "") or "")
+        cluster_matching_nodes = annotate_cluster_entries(cluster, result.get("matching_nodes", []))
+        cluster_matching_services = annotate_cluster_entries(cluster, result.get("matching_services", []))
+        cluster_matching_netnamespaces = annotate_cluster_entries(cluster, result.get("matching_netnamespaces", []))
+
+        if cluster_matching_nodes or cluster_matching_services or cluster_matching_netnamespaces:
+            matched_cluster_count += 1
+
+        matching_nodes.extend(cluster_matching_nodes)
+        matching_services.extend(cluster_matching_services)
+        matching_netnamespaces.extend(cluster_matching_netnamespaces)
+
+    return {
+        "ok": True,
+        "cluster": "all",
+        "ip": ip,
+        "matched": bool(matching_nodes or matching_services or matching_netnamespaces),
+        "cluster_count": len(results),
+        "successful_cluster_count": len(successful_results),
+        "failed_cluster_count": len(results) - len(successful_results),
+        "matched_cluster_count": matched_cluster_count,
+        "matching_nodes": matching_nodes,
+        "matching_services": matching_services,
+        "matching_netnamespaces": matching_netnamespaces,
+        "clusters": results,
+    }
+
+
+def list_requested_cluster_ip_usage(cluster: str) -> dict:
+    if is_all_clusters_target(cluster):
+        return list_all_cluster_ip_usage()
+    return list_cluster_ip_usage(cluster)
+
+
+def lookup_requested_cluster_ip_usage(cluster: str, ip: str) -> dict:
+    if is_all_clusters_target(cluster):
+        return lookup_all_cluster_ip_usage(ip)
+    return lookup_cluster_ip_usage(cluster, ip)

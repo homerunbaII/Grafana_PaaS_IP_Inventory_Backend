@@ -8,7 +8,8 @@ Standalone FastAPI backend for PaaS IP inventory and IP ownership lookup.
 - List current node external IP usage in a target cluster
 - List netnamespace egress IP usage in a target cluster
 - Look up which node or netnamespace is using a specific IP
-- Forward cluster API requests with a user-provided bearer token
+- Query one configured cluster or all configured clusters in one request
+- Use backend-managed service account bearer tokens from environment/Secret data
 
 ## Endpoints
 
@@ -25,6 +26,12 @@ Standalone FastAPI backend for PaaS IP inventory and IP ownership lookup.
   - Default: `https://api.{cluster}.lguplus.co.kr:6443`
 - `CLUSTER_API_INSECURE`
   - Default: `true`
+- `INVENTORY_CLUSTERS`
+  - Default: built-in cluster list used by the current panel
+- `CLUSTER_API_TOKENS_JSON`
+  - JSON object mapping cluster name to bearer token
+
+Requests no longer accept user-provided bearer tokens. The backend reads per-cluster tokens from environment variables or injected Secret data.
 
 Local `.env` loading is supported from the backend project root. A sample file is provided at `.env.example`.
 
