@@ -33,6 +33,56 @@ def ensure_curl_available() -> None:
     raise RuntimeError("curl is not available in this environment")
 
 
+def parse_curl_response(output: str) -> tuple[str, int]:
+    marker = "__HTTP_STATUS__:"
+    if marker not in output:
+        return output, 0
+
+    body, _, status_block = output.rpartition(marker)
+    status_text = status_block.strip()
+
+    try:
+        return body.rstrip(), int(status_text)
+    except ValueError:
+        return output, 0
+
+
+def parse_json_payload(body: str) -> dict | None:
+    cleaned = body.strip()
+    if not cleaned:
+        return None
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+    if isinstance(parsed, dict):
+        return parsed
+
+    return None
+
+
+def build_cluster_api_error(cluster: str, http_status: int, payload: dict | None, raw_body: str) -> str:
+    message = str((payload or {}).get("message", "") or "").strip()
+    reason = str((payload or {}).get("reason", "") or "").strip()
+    lowered = f"{message} {reason}".lower()
+
+    if http_status == 401:
+        if "expired" in lowered or "expire" in lowered:
+            return f"{cluster}: 토큰 기간이 만료되었습니다. Secret에 저장된 토큰을 갱신해 주세요."
+        return f"{cluster}: 토큰이 유효하지 않습니다. Secret에 저장된 토큰 값을 확인해 주세요."
+
+    if http_status == 403:
+        return f"{cluster}: 토큰은 유효하지만 조회 권한이 없습니다. cluster-reader 또는 필요한 권한을 확인해 주세요."
+
+    if http_status >= 400:
+        detail = message or raw_body.strip() or f"HTTP {http_status}"
+        return f"{cluster}: 클러스터 API 요청에 실패했습니다. {detail}"
+
+    return raw_body.strip() or f"{cluster}: 클러스터 API 요청에 실패했습니다."
+
+
 def run_cluster_curl(cluster: str, api_path: str) -> dict:
     ensure_curl_available()
 
@@ -52,6 +102,8 @@ def run_cluster_curl(cluster: str, api_path: str) -> dict:
         [
             "-H",
             f"Authorization: Bearer {bearer_token}",
+            "--write-out",
+            "\n__HTTP_STATUS__:%{http_code}",
             url,
         ]
     )
@@ -73,8 +125,14 @@ def run_cluster_curl(cluster: str, api_path: str) -> dict:
         detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
         raise RuntimeError(f"curl request failed: {detail}")
 
+    response_body, http_status = parse_curl_response(completed.stdout)
+    payload = parse_json_payload(response_body)
+
+    if http_status >= 400:
+        raise RuntimeError(build_cluster_api_error(cluster, http_status, payload, response_body))
+
     try:
-        return json.loads(completed.stdout)
+        return json.loads(response_body)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"invalid json response: {exc}") from exc
 
@@ -189,10 +247,14 @@ def list_cluster_ip_usage(cluster: str) -> dict:
         services_payload = run_cluster_curl(cluster, "/api/v1/services")
         netnamespaces_payload = run_cluster_curl(cluster, "/apis/network.openshift.io/v1/netnamespaces")
     except (RuntimeError, ValueError) as exc:
+        detail = str(exc)
+        if detail == f"no bearer token configured for cluster: {cluster}":
+            detail = f"{cluster}: 백엔드에 해당 클러스터 토큰이 설정되지 않았습니다."
+
         return {
             "ok": False,
             "error": "cluster_query_failed",
-            "detail": str(exc),
+            "detail": detail,
             "cluster": cluster,
         }
 
