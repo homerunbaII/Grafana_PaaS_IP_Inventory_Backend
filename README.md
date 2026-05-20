@@ -19,8 +19,14 @@ Standalone FastAPI backend for PaaS IP inventory and IP ownership lookup.
 
 ## Environment Variables
 
+- `CORS_ALLOW_ORIGINS`
+  - Default: `http://paasmon.apps.pcicd-k8s.lguplus.co.kr`
 - `CLUSTER_API_URL_TEMPLATE`
   - Default: `https://api.{cluster}.lguplus.co.kr:6443`
+- `CLUSTER_API_INSECURE`
+  - Default: `true`
+
+Local `.env` loading is supported from the backend project root. A sample file is provided at `.env.example`.
 
 ## Run Locally
 

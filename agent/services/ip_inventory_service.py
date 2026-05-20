@@ -3,7 +3,7 @@ import logging
 import shutil
 import subprocess
 
-from agent.config import build_cluster_api_url
+from agent.config import CLUSTER_API_INSECURE, build_cluster_api_url
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +39,20 @@ def run_cluster_curl(cluster: str, bearer_token: str, api_path: str) -> dict:
     url = f"{base_url}{api_path}"
     command = [
         "curl",
-        "--insecure",
         "--silent",
         "--show-error",
-        "-H",
-        f"Authorization: Bearer {bearer_token}",
-        url,
     ]
+
+    if CLUSTER_API_INSECURE:
+        command.append("--insecure")
+
+    command.extend(
+        [
+            "-H",
+            f"Authorization: Bearer {bearer_token}",
+            url,
+        ]
+    )
 
     logger.info("Running cluster curl for %s %s", cluster, api_path)
 
