@@ -2,12 +2,26 @@ import json
 import logging
 import shutil
 import subprocess
+from csv import DictWriter
 from dataclasses import dataclass
+from datetime import datetime
+from io import BytesIO, StringIO
+from ipaddress import ip_network
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from agent.config import CLUSTER_API_INSECURE, get_cluster_bearer_token, get_inventory_clusters, is_all_clusters_target
 from agent.config import build_cluster_api_url
 
 logger = logging.getLogger(__name__)
+
+REPORT_IP_RANGES = [
+    {"name": "172.23.20.0_24", "cidr": "172.23.20.0/24", "clusters": ["dprv-k8s", "eprsv-k8s"]},
+    {"name": "172.23.2.0_24", "cidr": "172.23.2.0/24", "clusters": ["sdprmn-paas", "dprmn-k8s", "dpvs-k8s"]},
+    {"name": "172.23.38.0_24", "cidr": "172.23.38.0/24", "clusters": ["dprsv-k8s", "dprrt-k8s"]},
+    {"name": "172.23.4.0_24", "cidr": "172.23.4.0/24", "clusters": ["pprv-k8s", "pprmn-k8s", "pprsv-k8s"]},
+    {"name": "172.23.5.0_24", "cidr": "172.23.5.0/24", "clusters": ["pprv-k8s", "pprmn-k8s", "pprsv-k8s"]},
+    {"name": "172.23.31.0_24", "cidr": "172.23.31.0/24", "clusters": ["pprrt-k8s"]},
+]
 
 
 @dataclass
@@ -400,6 +414,145 @@ def lookup_cluster_ip_usage(cluster: str, ip: str) -> dict:
 
 def annotate_cluster_entries(cluster: str, entries: list[dict]) -> list[dict]:
     return [{**entry, "cluster": cluster} for entry in entries]
+
+
+def build_ip_usage_index(cluster_results: list[dict]) -> dict[str, list[dict]]:
+    usage_by_ip: dict[str, list[dict]] = {}
+
+    for result in cluster_results:
+        if not result.get("ok"):
+            continue
+
+        cluster = str(result.get("cluster", "") or "").strip()
+        if not cluster:
+            continue
+
+        for node in result.get("nodes", []) or []:
+            for node_ip in node.get("ips", []) or []:
+                usage_by_ip.setdefault(str(node_ip), []).append(
+                    {
+                        "ip_type": "nodeIP",
+                        "cluster": cluster,
+                        "resource_kind": "Node",
+                        "resource_name": str(node.get("name", "") or "").strip(),
+                        "namespace": "",
+                        "details": f"roles={','.join(node.get('roles', []) or [])}",
+                    }
+                )
+
+        for service in result.get("services", []) or []:
+            for external_ip in service.get("externalIPs", []) or []:
+                usage_by_ip.setdefault(str(external_ip), []).append(
+                    {
+                        "ip_type": "externalIP",
+                        "cluster": cluster,
+                        "resource_kind": "Service",
+                        "resource_name": str(service.get("name", "") or "").strip(),
+                        "namespace": str(service.get("namespace", "") or "").strip(),
+                        "details": f"type={service.get('type', '')};clusterIP={service.get('clusterIP', '')}",
+                    }
+                )
+
+        for netnamespace in result.get("netnamespaces", []) or []:
+            for egress_ip in netnamespace.get("egressIPs", []) or []:
+                usage_by_ip.setdefault(str(egress_ip), []).append(
+                    {
+                        "ip_type": "egressIP",
+                        "cluster": cluster,
+                        "resource_kind": "Netnamespace",
+                        "resource_name": str(netnamespace.get("name", "") or "").strip(),
+                        "namespace": str(netnamespace.get("name", "") or "").strip(),
+                        "details": f"netid={netnamespace.get('netid', '')}",
+                    }
+                )
+
+    return usage_by_ip
+
+
+def join_usage_values(usages: list[dict], field: str) -> str:
+    seen: set[str] = set()
+    values: list[str] = []
+
+    for usage in usages:
+        raw = str(usage.get(field, "") or "").strip()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        values.append(raw)
+
+    return "\n".join(values)
+
+
+def build_usage_summary(usages: list[dict]) -> str:
+    summaries: list[str] = []
+
+    for usage in usages:
+        cluster = str(usage.get("cluster", "") or "").strip()
+        ip_type = str(usage.get("ip_type", "") or "").strip()
+        resource_kind = str(usage.get("resource_kind", "") or "").strip()
+        namespace = str(usage.get("namespace", "") or "").strip()
+        resource_name = str(usage.get("resource_name", "") or "").strip()
+        details = str(usage.get("details", "") or "").strip()
+
+        if namespace:
+            base = f"{cluster} | {ip_type} | {resource_kind} | {namespace}/{resource_name}"
+        else:
+            base = f"{cluster} | {ip_type} | {resource_kind} | {resource_name}"
+
+        summaries.append(f"{base} | {details}" if details else base)
+
+    return "\n".join(summaries)
+
+
+def build_range_report_rows(range_config: dict, usage_by_ip: dict[str, list[dict]]) -> list[dict[str, str]]:
+    network = ip_network(range_config["cidr"])
+    rows: list[dict[str, str]] = []
+
+    for current_ip in network:
+        ip_text = str(current_ip)
+        usages = usage_by_ip.get(ip_text, [])
+
+        rows.append(
+            {
+                "IP대역": range_config["cidr"],
+                "대상클러스터": ",".join(range_config["clusters"]),
+                "IP": ip_text,
+                "사용여부": "사용중" if usages else "",
+                "IP종류": join_usage_values(usages, "ip_type"),
+                "클러스터": join_usage_values(usages, "cluster"),
+                "리소스종류": join_usage_values(usages, "resource_kind"),
+                "리소스명": join_usage_values(usages, "resource_name"),
+                "네임스페이스": join_usage_values(usages, "namespace"),
+                "상세": build_usage_summary(usages),
+            }
+        )
+
+    return rows
+
+
+def build_csv_bytes(rows: list[dict[str, str]]) -> bytes:
+    output = StringIO(newline="")
+    fieldnames = ["IP대역", "대상클러스터", "IP", "사용여부", "IP종류", "클러스터", "리소스종류", "리소스명", "네임스페이스", "상세"]
+    writer = DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    return output.getvalue().encode("utf-8-sig")
+
+
+def build_inventory_report_zip() -> tuple[bytes, str]:
+    all_cluster_result = list_all_cluster_ip_usage()
+    cluster_results = all_cluster_result.get("clusters", []) or []
+    usage_by_ip = build_ip_usage_index(cluster_results)
+
+    buffer = BytesIO()
+    with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
+        for index, range_config in enumerate(REPORT_IP_RANGES, start=1):
+            rows = build_range_report_rows(range_config, usage_by_ip)
+            csv_bytes = build_csv_bytes(rows)
+            zip_file.writestr(f"{index:02d}_{range_config['name']}.csv", csv_bytes)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return buffer.getvalue(), f"ip_inventory_report_{timestamp}.zip"
 
 
 def list_all_cluster_ip_usage() -> dict:
