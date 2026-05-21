@@ -2,11 +2,22 @@ import json
 import logging
 import shutil
 import subprocess
+from dataclasses import dataclass
 
 from agent.config import CLUSTER_API_INSECURE, get_cluster_bearer_token, get_inventory_clusters, is_all_clusters_target
 from agent.config import build_cluster_api_url
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ClusterApiRequestError(RuntimeError):
+    cluster: str
+    http_status: int
+    detail: str
+
+    def __str__(self) -> str:
+        return self.detail
 
 
 def unique_non_empty_strings(values: list[str]) -> list[str]:
@@ -83,6 +94,79 @@ def build_cluster_api_error(cluster: str, http_status: int, payload: dict | None
     return raw_body.strip() or f"{cluster}: 클러스터 API 요청에 실패했습니다."
 
 
+def build_selector_requirement_match(labels: dict[str, str], requirement: dict) -> bool:
+    key = str(requirement.get("key", "") or "").strip()
+    operator = str(requirement.get("operator", "") or "").strip()
+    values = requirement.get("values", []) or []
+    label_exists = key in labels
+    label_value = labels.get(key)
+
+    if operator == "In":
+        return label_exists and label_value in values
+    if operator == "NotIn":
+        return (not label_exists) or label_value not in values
+    if operator == "Exists":
+        return label_exists
+    if operator == "DoesNotExist":
+        return not label_exists
+
+    return False
+
+
+def namespace_matches_selector(namespace_labels: dict, selector: dict) -> bool:
+    if not selector:
+        return False
+
+    match_labels = selector.get("matchLabels", {}) or {}
+    for key, value in match_labels.items():
+        if namespace_labels.get(key) != value:
+            return False
+
+    match_expressions = selector.get("matchExpressions", []) or []
+    for requirement in match_expressions:
+        if not isinstance(requirement, dict):
+            return False
+        if not build_selector_requirement_match(namespace_labels, requirement):
+            return False
+
+    return True
+
+
+def build_ovn_egressip_entries(namespaces_payload: dict, egressips_payload: dict) -> list[dict]:
+    namespace_items = namespaces_payload.get("items", [])
+    egressip_items = egressips_payload.get("items", [])
+    entries_by_namespace: dict[str, dict] = {}
+
+    for namespace in namespace_items:
+        metadata = namespace.get("metadata", {})
+        namespace_name = str(metadata.get("name", "") or "").strip()
+        namespace_labels = metadata.get("labels", {}) or {}
+        if not namespace_name:
+            continue
+
+        for egressip in egressip_items:
+            spec = egressip.get("spec", {}) or {}
+            selector = spec.get("namespaceSelector", {}) or {}
+            if not namespace_matches_selector(namespace_labels, selector):
+                continue
+
+            egress_ips = unique_non_empty_strings(spec.get("egressIPs", []) or [])
+            if not egress_ips:
+                continue
+
+            existing = entries_by_namespace.setdefault(
+                namespace_name,
+                {
+                    "name": namespace_name,
+                    "netid": None,
+                    "egressIPs": [],
+                },
+            )
+            existing["egressIPs"] = unique_non_empty_strings([*existing["egressIPs"], *egress_ips])
+
+    return list(entries_by_namespace.values())
+
+
 def run_cluster_curl(cluster: str, api_path: str) -> dict:
     ensure_curl_available()
 
@@ -129,7 +213,11 @@ def run_cluster_curl(cluster: str, api_path: str) -> dict:
     payload = parse_json_payload(response_body)
 
     if http_status >= 400:
-        raise RuntimeError(build_cluster_api_error(cluster, http_status, payload, response_body))
+        raise ClusterApiRequestError(
+            cluster=cluster,
+            http_status=http_status,
+            detail=build_cluster_api_error(cluster, http_status, payload, response_body),
+        )
 
     try:
         return json.loads(response_body)
@@ -241,12 +329,25 @@ def build_netnamespace_entries(payload: dict) -> list[dict]:
     return entries
 
 
+def list_cluster_netnamespace_entries(cluster: str) -> list[dict]:
+    try:
+        netnamespaces_payload = run_cluster_curl(cluster, "/apis/network.openshift.io/v1/netnamespaces")
+        return build_netnamespace_entries(netnamespaces_payload)
+    except ClusterApiRequestError as exc:
+        if exc.http_status != 404:
+            raise
+
+    namespaces_payload = run_cluster_curl(cluster, "/api/v1/namespaces")
+    egressips_payload = run_cluster_curl(cluster, "/apis/k8s.ovn.org/v1/egressips")
+    return build_ovn_egressip_entries(namespaces_payload, egressips_payload)
+
+
 def list_cluster_ip_usage(cluster: str) -> dict:
     try:
         nodes_payload = run_cluster_curl(cluster, "/api/v1/nodes")
         services_payload = run_cluster_curl(cluster, "/api/v1/services")
-        netnamespaces_payload = run_cluster_curl(cluster, "/apis/network.openshift.io/v1/netnamespaces")
-    except (RuntimeError, ValueError) as exc:
+        netnamespaces = list_cluster_netnamespace_entries(cluster)
+    except (RuntimeError, ValueError, ClusterApiRequestError) as exc:
         detail = str(exc)
         if detail == f"no bearer token configured for cluster: {cluster}":
             detail = f"{cluster}: 백엔드에 해당 클러스터 토큰이 설정되지 않았습니다."
@@ -260,7 +361,6 @@ def list_cluster_ip_usage(cluster: str) -> dict:
 
     nodes = build_node_entries(nodes_payload)
     services = build_service_entries(services_payload)
-    netnamespaces = build_netnamespace_entries(netnamespaces_payload)
 
     return {
         "ok": True,
