@@ -3,7 +3,14 @@
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        iputils-ping \
+        traceroute \
+        dnsutils \
+        iproute2 \
+        netcat-openbsd \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 COPY agent/requirements.txt ./requirements.txt
