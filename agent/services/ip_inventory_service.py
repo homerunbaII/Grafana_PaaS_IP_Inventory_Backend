@@ -2,6 +2,7 @@ import json
 import logging
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from csv import DictWriter
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,19 +10,71 @@ from io import BytesIO, StringIO
 from ipaddress import ip_network
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from agent.config import CLUSTER_API_INSECURE, get_cluster_bearer_token, get_inventory_clusters, is_all_clusters_target
-from agent.config import build_cluster_api_url
+from agent.config import CLUSTER_API_INSECURE, build_cluster_api_url, get_cluster_bearer_token, get_inventory_clusters
+from agent.config import is_all_clusters_target
 
 logger = logging.getLogger(__name__)
 
-REPORT_IP_RANGES = [
-    {"name": "172.23.20.0_24", "cidr": "172.23.20.0/24", "clusters": ["dprv-k8s", "eprsv-k8s"]},
-    {"name": "172.23.2.0_24", "cidr": "172.23.2.0/24", "clusters": ["sdprmn-paas", "dprmn-k8s", "dpvs-k8s"]},
-    {"name": "172.23.38.0_24", "cidr": "172.23.38.0/24", "clusters": ["dprsv-k8s", "dprrt-k8s"]},
-    {"name": "172.23.4.0_24", "cidr": "172.23.4.0/24", "clusters": ["pprv-k8s", "pprmn-k8s", "pprsv-k8s"]},
-    {"name": "172.23.5.0_24", "cidr": "172.23.5.0/24", "clusters": ["pprv-k8s", "pprmn-k8s", "pprsv-k8s"]},
-    {"name": "172.23.31.0_24", "cidr": "172.23.31.0/24", "clusters": ["pprrt-k8s"]},
+REPORT_RANGE_GROUPS = [
+    {
+        "key": "172.23.20",
+        "label": "172.23.20.0/24",
+        "filename": "01_172.23.20.0_24.csv",
+        "cidrs": ["172.23.20.0/24"],
+        "clusters": ["dprv-k8s", "eprsv-k8s"],
+        "ping_enabled": True,
+    },
+    {
+        "key": "172.23.2",
+        "label": "172.23.2.0/24",
+        "filename": "02_172.23.2.0_24.csv",
+        "cidrs": ["172.23.2.0/24"],
+        "clusters": ["sdprmn-paas", "dprmn-k8s", "dpvs-k8s"],
+        "ping_enabled": True,
+    },
+    {
+        "key": "172.23.38",
+        "label": "172.23.38.0/24",
+        "filename": "03_172.23.38.0_24.csv",
+        "cidrs": ["172.23.38.0/24"],
+        "clusters": ["dprsv-k8s", "dprrt-k8s"],
+        "ping_enabled": True,
+    },
+    {
+        "key": "172.23.4-5",
+        "label": "172.23.4.0/24 + 172.23.5.0/24",
+        "filename": "04_172.23.4.0_24__172.23.5.0_24.csv",
+        "cidrs": ["172.23.4.0/24", "172.23.5.0/24"],
+        "clusters": ["pprv-k8s", "pprmn-k8s", "pprsv-k8s"],
+        "ping_enabled": True,
+    },
+    {
+        "key": "172.23.31",
+        "label": "172.23.31.0/24",
+        "filename": "05_172.23.31.0_24.csv",
+        "cidrs": ["172.23.31.0/24"],
+        "clusters": ["pprrt-k8s"],
+        "ping_enabled": False,
+    },
 ]
+
+CSV_FIELDNAMES = [
+    "IP대역",
+    "대상클러스터",
+    "IP",
+    "사용여부",
+    "IP종류",
+    "클러스터",
+    "리소스종류",
+    "리소스명",
+    "네임스페이스",
+    "Ping상태",
+    "상세",
+]
+
+PING_MAX_ATTEMPTS = 3
+PING_TIMEOUT_SECONDS = 1
+PING_MAX_WORKERS = 64
 
 
 @dataclass
@@ -103,9 +156,9 @@ def build_cluster_api_error(cluster: str, http_status: int, payload: dict | None
 
     if http_status >= 400:
         detail = message or raw_body.strip() or f"HTTP {http_status}"
-        return f"{cluster}: 클러스터 API 요청에 실패했습니다. {detail}"
+        return f"{cluster}: 클러스터 API 요청이 실패했습니다. {detail}"
 
-    return raw_body.strip() or f"{cluster}: 클러스터 API 요청에 실패했습니다."
+    return raw_body.strip() or f"{cluster}: 클러스터 API 요청이 실패했습니다."
 
 
 def build_selector_requirement_match(labels: dict[str, str], requirement: dict) -> bool:
@@ -504,52 +557,224 @@ def build_usage_summary(usages: list[dict]) -> str:
     return "\n".join(summaries)
 
 
-def build_range_report_rows(range_config: dict, usage_by_ip: dict[str, list[dict]]) -> list[dict[str, str]]:
-    network = ip_network(range_config["cidr"])
-    rows: list[dict[str, str]] = []
+def ping_binary_available() -> bool:
+    return shutil.which("ping") is not None
 
-    for current_ip in network:
-        ip_text = str(current_ip)
-        usages = usage_by_ip.get(ip_text, [])
 
-        rows.append(
-            {
-                "IP대역": range_config["cidr"],
-                "대상클러스터": ",".join(range_config["clusters"]),
-                "IP": ip_text,
-                "사용여부": "사용중" if usages else "",
-                "IP종류": join_usage_values(usages, "ip_type"),
-                "클러스터": join_usage_values(usages, "cluster"),
-                "리소스종류": join_usage_values(usages, "resource_kind"),
-                "리소스명": join_usage_values(usages, "resource_name"),
-                "네임스페이스": join_usage_values(usages, "namespace"),
-                "상세": build_usage_summary(usages),
-            }
+def ping_ip_once(ip_text: str) -> bool:
+    command = ["ping", "-c", "1", "-W", str(PING_TIMEOUT_SECONDS), ip_text]
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=PING_TIMEOUT_SECONDS + 2,
+            check=False,
         )
+    except subprocess.TimeoutExpired:
+        return False
 
-    return rows
+    return completed.returncode == 0
 
 
-def build_csv_bytes(rows: list[dict[str, str]]) -> bytes:
+def ping_ip_with_retries(ip_text: str) -> bool:
+    for _ in range(PING_MAX_ATTEMPTS):
+        if ping_ip_once(ip_text):
+            return True
+    return False
+
+
+def collect_ping_targets(usage_by_ip: dict[str, list[dict]]) -> list[str]:
+    targets: list[str] = []
+
+    for range_group in REPORT_RANGE_GROUPS:
+        if not range_group["ping_enabled"]:
+            continue
+
+        for cidr in range_group["cidrs"]:
+            for current_ip in ip_network(cidr):
+                ip_text = str(current_ip)
+                if ip_text in usage_by_ip:
+                    continue
+                targets.append(ip_text)
+
+    return targets
+
+
+def run_ping_scan(usage_by_ip: dict[str, list[dict]]) -> dict[str, bool]:
+    if not ping_binary_available():
+        logger.warning("ping binary is not available; skipping ping scan")
+        return {}
+
+    targets = collect_ping_targets(usage_by_ip)
+    if not targets:
+        return {}
+
+    results: dict[str, bool] = {}
+    max_workers = min(PING_MAX_WORKERS, len(targets))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ip = {executor.submit(ping_ip_with_retries, ip_text): ip_text for ip_text in targets}
+
+        for future in as_completed(future_to_ip):
+            ip_text = future_to_ip[future]
+            try:
+                results[ip_text] = future.result()
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.warning("Ping scan failed for %s: %s", ip_text, exc)
+                results[ip_text] = False
+
+    return results
+
+
+def build_report_row(
+    *,
+    range_group: dict,
+    cidr: str,
+    ip_text: str,
+    usages: list[dict],
+    ping_results: dict[str, bool],
+    ping_available: bool,
+) -> dict:
+    ping_enabled = bool(range_group["ping_enabled"])
+    ping_checked = ping_enabled and ping_available and not usages
+    ping_responded = bool(ping_results.get(ip_text, False)) if ping_checked else False
+    status = "사용중" if usages or ping_responded else ""
+
+    ip_type = join_usage_values(usages, "ip_type")
+    if not ip_type and ping_responded:
+        ip_type = "ping응답"
+
+    resource_kind = join_usage_values(usages, "resource_kind")
+    if not resource_kind and ping_responded:
+        resource_kind = "외부응답"
+
+    detail = build_usage_summary(usages)
+    if not detail and ping_responded:
+        detail = "OKD 미사용, ping 응답 확인"
+    elif not detail and not ping_enabled:
+        detail = "ping 스캔 제외 대역"
+
+    ping_status = ""
+    if ping_responded:
+        ping_status = "응답"
+    elif not ping_enabled:
+        ping_status = "제외"
+
+    return {
+        "rangeLabel": range_group["label"],
+        "cidr": cidr,
+        "targetClusters": list(range_group["clusters"]),
+        "ip": ip_text,
+        "status": status,
+        "okdUsed": bool(usages),
+        "ipType": ip_type,
+        "cluster": join_usage_values(usages, "cluster"),
+        "resourceKind": resource_kind,
+        "resourceName": join_usage_values(usages, "resource_name"),
+        "namespace": join_usage_values(usages, "namespace"),
+        "pingStatus": ping_status,
+        "pingChecked": ping_checked,
+        "pingResponded": ping_responded,
+        "detail": detail,
+        "csv": {
+            "IP대역": cidr,
+            "대상클러스터": ",".join(range_group["clusters"]),
+            "IP": ip_text,
+            "사용여부": status,
+            "IP종류": ip_type,
+            "클러스터": join_usage_values(usages, "cluster"),
+            "리소스종류": resource_kind,
+            "리소스명": join_usage_values(usages, "resource_name"),
+            "네임스페이스": join_usage_values(usages, "namespace"),
+            "Ping상태": ping_status,
+            "상세": detail,
+        },
+    }
+
+
+def build_range_report(range_group: dict, usage_by_ip: dict[str, list[dict]], ping_results: dict[str, bool], ping_available: bool) -> dict:
+    rows: list[dict] = []
+
+    for cidr in range_group["cidrs"]:
+        for current_ip in ip_network(cidr):
+            ip_text = str(current_ip)
+            usages = usage_by_ip.get(ip_text, [])
+            rows.append(
+                build_report_row(
+                    range_group=range_group,
+                    cidr=cidr,
+                    ip_text=ip_text,
+                    usages=usages,
+                    ping_results=ping_results,
+                    ping_available=ping_available,
+                )
+            )
+
+    used_count = sum(1 for row in rows if row["status"] == "사용중")
+    okd_used_count = sum(1 for row in rows if row["okdUsed"])
+    ping_used_count = sum(1 for row in rows if row["pingResponded"])
+
+    return {
+        "key": range_group["key"],
+        "label": range_group["label"],
+        "filename": range_group["filename"],
+        "cidrs": list(range_group["cidrs"]),
+        "targetClusters": list(range_group["clusters"]),
+        "pingEnabled": bool(range_group["ping_enabled"]),
+        "rowCount": len(rows),
+        "usedCount": used_count,
+        "okdUsedCount": okd_used_count,
+        "pingUsedCount": ping_used_count,
+        "rows": rows,
+    }
+
+
+def build_csv_bytes(rows: list[dict]) -> bytes:
     output = StringIO(newline="")
-    fieldnames = ["IP대역", "대상클러스터", "IP", "사용여부", "IP종류", "클러스터", "리소스종류", "리소스명", "네임스페이스", "상세"]
-    writer = DictWriter(output, fieldnames=fieldnames)
+    writer = DictWriter(output, fieldnames=CSV_FIELDNAMES)
     writer.writeheader()
-    writer.writerows(rows)
+    writer.writerows(row["csv"] for row in rows)
     return output.getvalue().encode("utf-8-sig")
 
 
-def build_inventory_report_zip() -> tuple[bytes, str]:
+def build_inventory_report_data() -> dict:
     all_cluster_result = list_all_cluster_ip_usage()
     cluster_results = all_cluster_result.get("clusters", []) or []
     usage_by_ip = build_ip_usage_index(cluster_results)
+    ping_available = ping_binary_available()
+    ping_results = run_ping_scan(usage_by_ip) if ping_available else {}
+
+    ranges = [
+        build_range_report(
+            range_group=range_group,
+            usage_by_ip=usage_by_ip,
+            ping_results=ping_results,
+            ping_available=ping_available,
+        )
+        for range_group in REPORT_RANGE_GROUPS
+    ]
+
+    return {
+        **all_cluster_result,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "ping_available": ping_available,
+        "ping_target_count": len(collect_ping_targets(usage_by_ip)) if ping_available else 0,
+        "ping_responded_count": sum(1 for responded in ping_results.values() if responded),
+        "ranges": ranges,
+    }
+
+
+def build_inventory_report_zip() -> tuple[bytes, str]:
+    report = build_inventory_report_data()
+    ranges = report.get("ranges", []) or []
 
     buffer = BytesIO()
     with ZipFile(buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
-        for index, range_config in enumerate(REPORT_IP_RANGES, start=1):
-            rows = build_range_report_rows(range_config, usage_by_ip)
-            csv_bytes = build_csv_bytes(rows)
-            zip_file.writestr(f"{index:02d}_{range_config['name']}.csv", csv_bytes)
+        for range_report in ranges:
+            csv_bytes = build_csv_bytes(range_report.get("rows", []) or [])
+            zip_file.writestr(range_report["filename"], csv_bytes)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return buffer.getvalue(), f"ip_inventory_report_{timestamp}.zip"

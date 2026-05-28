@@ -3,7 +3,8 @@ from fastapi.responses import StreamingResponse
 from io import BytesIO
 
 from agent.models.ip_inventory import IpInventoryListRequest, IpInventoryLookupRequest
-from agent.services.ip_inventory_service import build_inventory_report_zip, list_requested_cluster_ip_usage, lookup_requested_cluster_ip_usage
+from agent.services.ip_inventory_service import build_inventory_report_data, build_inventory_report_zip, list_requested_cluster_ip_usage
+from agent.services.ip_inventory_service import lookup_requested_cluster_ip_usage
 
 router = APIRouter(prefix="/ip-inventory", tags=["ip-inventory"])
 
@@ -29,3 +30,8 @@ async def handle_ip_inventory_report_download(body: IpInventoryListRequest):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/report/data")
+async def handle_ip_inventory_report_data(body: IpInventoryListRequest):
+    return build_inventory_report_data()
