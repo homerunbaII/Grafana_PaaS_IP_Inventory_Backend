@@ -17,25 +17,17 @@ logger = logging.getLogger(__name__)
 
 REPORT_RANGE_GROUPS = [
     {
-        "key": "172.23.20",
-        "label": "172.23.20.0/24",
-        "filename": "01_172.23.20.0_24.csv",
-        "cidrs": ["172.23.20.0/24"],
-        "clusters": ["dprv-k8s", "eprsv-k8s"],
-        "ping_enabled": True,
-    },
-    {
-        "key": "172.23.21",
-        "label": "172.23.21.0/24",
-        "filename": "02_172.23.21.0_24.csv",
-        "cidrs": ["172.23.21.0/24"],
+        "key": "172.23.20-21",
+        "label": "172.23.20.0/24 + 172.23.21.0/24",
+        "filename": "01_172.23.20.0_24__172.23.21.0_24.csv",
+        "cidrs": ["172.23.20.0/24", "172.23.21.0/24"],
         "clusters": ["sdprmn-paas", "dprmn-k8s", "dpvs-k8s"],
         "ping_enabled": True,
     },
     {
         "key": "172.23.38",
         "label": "172.23.38.0/24",
-        "filename": "03_172.23.38.0_24.csv",
+        "filename": "02_172.23.38.0_24.csv",
         "cidrs": ["172.23.38.0/24"],
         "clusters": ["dprsv-k8s", "dprrt-k8s"],
         "ping_enabled": True,
@@ -43,7 +35,7 @@ REPORT_RANGE_GROUPS = [
     {
         "key": "172.23.4-5",
         "label": "172.23.4.0/24 + 172.23.5.0/24",
-        "filename": "04_172.23.4.0_24__172.23.5.0_24.csv",
+        "filename": "03_172.23.4.0_24__172.23.5.0_24.csv",
         "cidrs": ["172.23.4.0/24", "172.23.5.0/24"],
         "clusters": ["pprv-k8s", "pprmn-k8s", "pprsv-k8s"],
         "ping_enabled": True,
@@ -51,7 +43,7 @@ REPORT_RANGE_GROUPS = [
     {
         "key": "172.23.31",
         "label": "172.23.31.0/24",
-        "filename": "05_172.23.31.0_24.csv",
+        "filename": "04_172.23.31.0_24.csv",
         "cidrs": ["172.23.31.0/24"],
         "clusters": ["pprrt-k8s"],
         "ping_enabled": False,
